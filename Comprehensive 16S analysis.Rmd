@@ -1,0 +1,528 @@
+---
+title: "Sample 16S analysis"
+author: "Choon Kiat Sim"
+date: "7/11/2019"
+output: html_document
+---
+Read in the phyloseq object and load the libraries.
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+library(ggplot2);library(ggpubr);library("phyloseq");library("ggplot2");library(gridExtra);library("stringr");library("reshape2");library("genefilter"); library(knitr);library(DESeq2); theme_set(theme_bw());library(vegan);library(scales);library(dplyr);library(tidyr);library(plyr)
+
+rm(list=ls())
+setwd("~/Desktop/MS0019_R1")
+phy = readRDS("~/Desktop/MS0019_R1/MS0019_R1.rds")
+theme_set(theme_bw())
+#Add sample data to phyloseq object
+sampledata <- read.csv("~/Desktop/MS0019_R1/metadata_MS0019.csv", row.names=1)
+sampledata <- sample_data(sampledata)
+phy <- merge_phyloseq(phy,sampledata)
+
+```
+
+let's add variables to metadata
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+#Add Depth to metadata
+sample_data(phy)$Depth = sample_sums(phy) 
+
+#Find number of kp reads in each file and add to sampledata
+map=data.frame(sample_data(phy))
+kphy=subset_taxa(phy, Genus=="Klebsiella")
+mysums=sample_sums(kphy)
+sample_data(phy)$kp_reads=mysums
+```
+
+#Overall view of sample space
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+#let's look at the data
+df = data.frame(sample_data(phy))
+a=ggplot(df, aes(Mouse_old, Day)) + geom_point(aes(color=as.factor(Rep),size=5))  + xlab("Mouse") 
+ggsave(a,filename="layout.png", width = 6, height = 6)
+
+
+#how many samples
+nsamples(phy)
+
+#how many taxa
+ntaxa(phy)
+```
+
+
+
+#Figure 3D: Calculate Alpha diversity. 
+I calculate richness, inverse-simpson, and shannon, but only display Shannon in main figure.
+Note that the phyloseq object is unfiltered at this point.
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+#min number of reads
+min_lib <- min(sample_sums(phy))
+#min_lib = 10000
+
+# Initialize matrices to store richness and evenness estimates
+nsamp = nsamples(phy)
+trials = 100
+
+richness <- matrix(nrow = nsamp, ncol = trials)
+row.names(richness) <- sample_names(phy)
+
+evenness <- matrix(nrow = nsamp, ncol = trials)
+row.names(evenness) <- sample_names(phy)
+
+evenness_shannon <- matrix(nrow = nsamp, ncol = trials)
+row.names(evenness_shannon) <- sample_names(phy)
+
+# It is always important to set a seed when you subsample so your result is replicable 
+set.seed(3)
+
+for (i in 1:100) {
+  # Subsample
+  r <- rarefy_even_depth(phy, sample.size = min_lib, verbose = FALSE, replace = TRUE)
+  
+  # Calculate richness
+  rich <- as.numeric(as.matrix(estimate_richness(r, measures = "Observed")))
+  richness[ ,i] <- rich
+  
+  # Calculate evenness
+  even <- as.numeric(as.matrix(estimate_richness(r, measures = "InvSimpson")))
+  evenness[ ,i] <- even
+  
+  # Calculate Shannon
+  even_shannon <- as.numeric(as.matrix(estimate_richness(r, measures = "Shannon")))
+  evenness_shannon[ ,i] <- even_shannon
+}
+
+
+# Create a new dataframe to hold the means and standard deviations of richness estimates
+SampleNameLong <- row.names(richness)
+mean <- apply(richness, 1, mean)
+sd <- apply(richness, 1, sd)
+measure <- rep("Richness", nsamp)
+rich_stats <- data.frame(SampleNameLong, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness estimates
+SampleNameLong <- row.names(evenness)
+mean <- apply(evenness, 1, mean)
+sd <- apply(evenness, 1, sd)
+measure <- rep("Inverse Simpson", nsamp)
+even_stats <- data.frame(SampleNameLong, mean, sd, measure)
+
+# Create a new dataframe to hold the means and standard deviations of evenness_shannon estimates
+SampleNameLong <- row.names(evenness_shannon)
+mean <- apply(evenness_shannon, 1, mean)
+sd <- apply(evenness_shannon, 1, sd)
+measure <- rep("Shannon", nsamp)
+even_shannon_stats <- data.frame(SampleNameLong, mean, sd, measure)
+
+alpha <- rbind(rich_stats, even_stats, even_shannon_stats)
+s <- data.frame(sample_data(phy))
+alphadiv <- merge(alpha, s, by = "SampleNameLong") 
+#head(alphadiv)[3,3]
+
+p <- ggplot(alphadiv, aes(x = as.factor(Day_old), y = mean)) +
+  geom_point(size = 1.2) + 
+  geom_line(size = 0.8) +
+  geom_boxplot()+
+  facet_wrap(~measure, ncol = 3, scales = "free")+
+  ylab("Alpha diversity")+
+  xlab("Day")
+
+s <- data.frame(sample_data(phy))
+shannondiv <- merge(even_shannon_stats, s, by = "SampleNameLong") 
+#shannondiv
+
+p1 <- ggplot(shannondiv, aes(x = as.factor(Day_old), y = mean)) +
+  geom_point(size = 1.2) + 
+  geom_line(size = 0.8) +
+  geom_boxplot()+
+  ylab("Shannon diversity")+
+  xlab("Days")+
+  theme(axis.text.x = element_text(size=10))+
+  theme(axis.text.y = element_text(size=10))+
+  theme(strip.text.x = element_text(size = 10))+
+  theme(axis.title=element_text(size=10)) +
+  ggtitle("D")+
+  annotate("rect", xmin=8, xmax=11, ymin=0, ymax=Inf, alpha=0.2, fill="orange")
+
+ggsave(p1, filename="alpha1.png", width = 3, height = 3)
+fig3d = p1
+fig3d
+```
+
+### Let's look at the prevalence of taxa plotted as a function of their abundance. 
+We'll use this information to filter out noisy taxa, those that are neither prevalent nore abundant. I think the data should be filtered at an abundance threshold of 100 reads (e.g., lose taxa that don't have at least 100 reads across samples) and that are not present in at least 10 samples. The vertical and horizontal lines across this plot reflect these thresholds. This is of course somewhat arbitrary, but we can see from the distribution that we won't lose too many taxa and these are likely to muddy any real signal we'd otherwise detect.
+
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+###How prevalent are individual taxa?
+tax = data.frame(phy@tax_table@.Data) 
+tax$ASV_name = paste0("ASV_", 1:ntaxa(phy))
+tax_table(phy) = tax_table(as.matrix(tax))
+taxa_names(phy) = tax$ASV_name
+
+otus_pa = decostand(t(data.frame(otu_table(phy))), "pa")
+PhyPA =phy
+otu_table(PhyPA) = otu_table(otus_pa, taxa_are_rows = TRUE)
+
+#plot the abundance vs. prevalence
+df = data.frame(taxa_sums(PhyPA), taxa_sums(phy), PhyPA@tax_table@.Data)
+colnames(df)[1:2]= c("Prevalence", "Abundance")
+p = ggplot(df, aes(Prevalence, Abundance)) + geom_point() + scale_y_log10(label=comma) + 
+    geom_vline(xintercept = 10) + geom_hline(yintercept = 100)
+p
+```
+
+
+Let's make some more diagnostic plots. We'll look at rank abundance curves, the top 10 genera, as well as the number of ASVs per genus.
+
+* PanelA - Let's make a rank abundance curve
+* PanelB- Let's look at the top10 most abundant genera; circle size represents total observed taxon abundance
+* PanelC - Let's look at the number of ASVs per genus; circle size represents total observed taxon abundance
+* PanelD -Let's look at the prevalence of the ASVs plotted as a function of abundance
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+genus.phy = tax_glom(phy, "Genus")
+myNames=as.vector(as.data.frame(genus.phy@tax_table@.Data)$Genus)
+taxa_names(genus.phy) = myNames                 
+df = data.frame(taxa_names(genus.phy), as.numeric(taxa_sums(genus.phy)))
+colnames(df) = c("Genus", "Abundance")
+
+#we need to clean up the data table since the genera column is full of 'genus_1' making a single genus appear as multiple distinct genera
+ConsolidatedGenera_df = df %>% 
+    tidyr::separate(Genus, "_", into="Genus", extra = "drop", fill = "right") %>% 
+    aggregate(. ~Genus, ., sum) %>%
+    dplyr::mutate(Rank = rank(desc(Abundance), ties.method="random")) %>%
+    dplyr::arrange(desc(Abundance))  
+
+#we also want the genera to be their specific names so we can plot those also
+outGenera_df = df  %>% 
+    aggregate(. ~Genus, ., sum) %>%
+    dplyr::mutate(Rank = rank(desc(Abundance), ties.method="random")) %>%
+    dplyr::arrange(desc(Abundance))  
+
+
+###How diverse are the different genera? i.e., how many species are there per genus?
+genus.tab = data.frame(Genus=rep(0, length(myNames)), Ntaxa=rep(0,length(myNames)))
+for(i in 1:length(myNames)){
+      physub = subset_taxa(phy, Genus==myNames[i])
+      physub = prune_taxa(taxa_sums(physub) > 0, physub)
+      genus.tab[i, ] = c(myNames[i], ntaxa(physub))
+      }
+      
+TidyDf= plyr::join(genus.tab, outGenera_df)
+TidyDf$Ntaxa = as.numeric(as.character(TidyDf$Ntaxa))
+
+
+# Let's plot the graphs
+p1 = ggplot(ConsolidatedGenera_df[1:50,], aes(Rank, Abundance)) + geom_bar(stat="identity") + ggtitle("") + scale_y_continuous(labels=comma) 
+p2 = ggplot(ConsolidatedGenera_df[1:10,], aes(Genus, Rank)) + geom_point(aes(size=Abundance))  + ggtitle("")  + coord_flip()
+p3 = ggplot(TidyDf, aes(Rank, Ntaxa)) + geom_point(aes(size=Abundance)) + 
+            geom_text(data=subset(TidyDf, Ntaxa >2),
+            aes(x=Rank,y=Ntaxa,label=Genus), nudge_x=50, color="blue") + ggtitle("")
+            
+grid.arrange(p1, p2, p3, ncol=2)
+
+```
+
+Now let's filter the taxa based on the thresholds from above.
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+#filter the taxa based on the prevalence abundance curve above
+filtergroup = filterfun(kOverA(k=10, A=100)) #k = number of samples; A = abundance
+        filtPhy = filter_taxa(phy, filtergroup, prune=TRUE) 
+        filtPhy = prune_taxa(taxa_sums(filtPhy) > 0, filtPhy) 
+        filtPhy = prune_samples(sample_sums(filtPhy) > 0, filtPhy) 
+        filtPhy
+  
+
+```
+
+Let's look at total sequencing depth for each timepoint to see if this varies. 
+
+We also look at the number of samples for each time point and notice that there are roughly equal numbers of samples per condition. 
+
+Both the variability in sequencing depth and the number of samples looks good.
+
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+#do we have a total reduction in biomass
+df = data.frame(sample_sums(filtPhy), sample_data(filtPhy))
+colnames(df)[1] = "depth"
+
+#lets look at sequencing depth as a function of time
+p2 = ggplot(df, aes(as.factor(Day_old), depth)) + geom_boxplot()+ stat_compare_means(comparisons = levels(df$Day_old))
+
+#how many samples are in each group = there are approximately 64 samples in each gorup
+table(df$Day_old)
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+
+### Figure 3C: I am plotting relative abundance of the top 10 genera. 
+I show the pooled relative abundance of the first 7 mice only because the 8th mice have missing data. 
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+relab = filtPhy
+#SET NAarm to FALSE so that NA betw phylum and genus are retained
+filtPhy.genus = tax_glom(relab, "Genus", NArm = FALSE)
+filtPhy.genus
+
+#Find and sort top 10 genus
+top10 <- names(sort(taxa_sums(filtPhy.genus), decreasing=TRUE))[1:10]
+filtPhy.genus.top10 <- prune_taxa(top10, filtPhy.genus)
+
+# Transform to relative abundance. Save as new object.
+filtPhy.genus.top10.ra = transform_sample_counts(filtPhy.genus.top10, function(x){x / sum(x)})
+
+colors<-c("#FF6666", "#FFCC99", "#31a354","grey","dodgerblue3", "lightblue2", "mediumpurple4", "#c994c7","black" )
+
+#Subset first 7 mice so that relative abundance reads are summed up over same number of mice, as day 12 and day 72 have 7 mice only.
+
+filtPhy.genus.top10.ra = subset_samples(filtPhy.genus.top10.ra, Mouse_old !="8")
+#Plotting
+p = plot_bar(filtPhy.genus.top10.ra, x="Day", fill="Family")
+df=p$data
+p = ggplot(df, aes (as.factor(Day_old), Abundance/7)) + 
+    geom_bar(aes(color=Family, fill=Family), stat="identity", position="stack") + 
+    xlab("Day") + ylab("Relative Abundance")+
+    scale_colour_manual(values=colors) + scale_fill_manual(values=colors) + 
+    ggtitle("C")+
+    annotate("segment", x=8.5, xend=8.5, y=-Inf, yend=Inf, color="black")
+ggsave(p, filename="Relab_family_top10.png", width = 5, height = 3)
+fig3c = p
+fig3c
+```
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+#add taxa abundances to the taxa table ; place after tax_glom, otherwise the ASV_name will prevent the glom
+df = data.frame(taxa_sums(phy), phy@tax_table@.Data)
+colnames(df)[1] = "Phy.Abundance"
+rownames(df) = df$ASV_name
+tax_table(phy) = tax_table(as.matrix(df))
+
+#add taxa abundances to the taxa table - FILTERED READS ; place after tax_glom, otherwise the ASV_name will prevent the glom
+df = data.frame(taxa_sums(filtPhy), filtPhy@tax_table@.Data)
+colnames(df)[1] = "FiltPhy.Abundance"
+rownames(df) = df$ASV_name
+tax_table(filtPhy) = tax_table(as.matrix(df))
+```
+
+###Figure 3E: I show variance-stabilized Bray-curtis of all samples.
+It is observed that day 12, 66 and 72 clustered together, as these samples contain high amounts of klebsiella. The samples show a development path of the microbiota by tracing a clockwise circle starting from day 12 and ending at roughly the same place in the ordination at day 72.
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+ps = filtPhy
+#stabilize the variance
+otu_table(ps) <- otu_table(ps) + 1 
+ps.ds = phyloseq_to_deseq2(ps, ~Day) # study design factor 
+ps_vst <- varianceStabilizingTransformation(ps.ds , blind=FALSE, fitType="local")
+counts_VST <- otu_table(as.matrix(assay(ps_vst)), taxa_are_rows=TRUE)
+counts_VST[counts_VST < 0.0] <- 0.0
+otu_table(ps) <- counts_VST
+
+#Bray-curtis
+out.bc <- ordinate(ps, method = "PCoA", distance = "bray") #bray,jaccard, jsd, euclidean.
+evals.bc <- out.bc$values$Eigenvalues
+p.bray=plot_ordination(ps, out.bc, shape ="Kp", color ="Day") #+
+#coord_fixed(sqrt(evals.bc[2] / evals.bc[1])) 
+
+p.bray=p.bray+ geom_point(aes(size=kp_reads)) +
+      guides(color=guide_legend(title="Day"),shape=guide_legend(title="Kp culture"), 
+      size=guide_legend(title="Kp sequencing depth"))+
+      theme(legend.box = "horizontal")+
+      theme(text = element_text(size=10, family="Helvetica"))+
+      ggtitle("E")+
+      xlab("PC1 (44.5%)") + ylab ("PC2 (18.1%)")
+ggsave(p.bray, filename="all stools_bray.png", width = 6, height = 3)
+fig3e = p.bray
+fig3e
+
+```
+
+
+
+###Figure 3F: DeSeq2: I am dividing the samples into pre-antibiotic early vs pre-antibiotic late groups to calculate differential abundance.
+Early group contains day 12, 22, 30, 40.
+Late group contains day 46, 54, 61, 64. 
+Post-antibiotic day 66 and 72 are excluded from analysis.
+The hypothesis is that because the early group is associated with a developing microbiota (which is more conducive to Klebsiella) and the late group is associated with a relative stabilization of microbiota (which is less conducive to Klebsiella), there will be differences in community structure in the two groups. 
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+
+### Use DESEq2 to identify taxa that are differentially abundant 
+diagdds = phyloseq_to_deseq2(filtPhy, ~ Group)
+#let's relevel so baseline is the b
+diagdds$Group <- relevel( diagdds$Group, "Early")
+
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds), 1, gm_mean)
+diagdds = estimateSizeFactors(diagdds, geoMeans = geoMeans)
+diagdds = DESeq(diagdds, fitType="local")
+
+res = results(diagdds, cooksCutoff = FALSE)
+alpha = 0.05
+sigtab = res[which(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(filtPhy)[rownames(sigtab), ], "matrix"))
+#select taxa that are at least 3 fold enriched
+posigtab = sigtab[sigtab[, "log2FoldChange"] > 3, ]
+posigtab = posigtab[, c("baseMean", "log2FoldChange", "lfcSE", "padj", "Phylum", "Class", "Family", "Genus")]
+
+library("ggplot2")
+sigtabgen = subset(sigtab, !is.na(Genus))
+# Phylum order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$Phylum, function(x) max(x))
+x = sort(x, TRUE)
+sigtabgen$Phylum = factor(as.character(sigtabgen$Phylum), levels=names(x))
+# Genus order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$Genus, function(x) max(x))
+x = sort(x, TRUE)
+sigtabgen$Genus = factor(as.character(sigtabgen$Genus), levels=names(x))
+sigtabgen = subset(sigtabgen, padj < 0.05)
+sigtab$Taxa = paste0(sigtab$Family, "_", sigtab$Genus)
+
+#Create new variable (highest rank) for plotting
+sigtab$Highest_rank = ifelse(is.na(sigtab$Genus), as.character(sigtab$Family), as.character(sigtab$Genus))
+
+#sort taxa on sigtab
+# Phylum order
+x = tapply(sigtab$log2FoldChange, sigtab$Phylum, function(x) max(x))
+x = sort(x, TRUE)
+sigtab$Phylum = factor(as.character(sigtab$Phylum), levels=names(x))
+# Genus order
+x = tapply(sigtab$log2FoldChange, sigtab$Highest_rank, function(x) max(x))
+x = sort(x, TRUE)
+sigtab$Highest_rank = factor(as.character(sigtab$Highest_rank), levels=names(x))
+sigtab = subset(sigtab, padj < 0.05)
+
+
+colors<-c("Firmicutes"="#009900","Bacteroidetes"="#FF6666","Proteobacteria"="#3399FF", "Patescibacteria"="lightblue2", "Deferribacteres"="#c994c7", "Tenericutes"="mediumpurple4", "Verrucomicrobia"="#CD853F", "Actinobacteria"="#A0A0A0")
+
+
+p1=ggplot(sigtab, aes(y=Highest_rank, x=log2FoldChange, color=Phylum, size=baseMean)) +
+       geom_vline(xintercept = c(0), color = "gray", size = 0.5) +
+      geom_vline(xintercept = c(-40,-20,20,40), color = "gray", size = 0.2)+
+       geom_point() + ggtitle("F")+
+      xlim(-40, 40)+
+      scale_colour_manual(values=colors) + scale_fill_manual(values=colors) +
+       xlab("Log2 fold change of Early vs Late Microbiota (pre-antibiotic)")+
+       ylab("Taxa")
+
+ggsave(p1, filename="Early_vs_Late_deseq.png", height=6, width=6)
+fig3f = p1 
+fig3f
+```
+
+###Figure 3G: These are taxa associated with a developing microbiota (conducive to Klebsiella) in the early group.
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+bigChange = subset(sigtab, log2FoldChange < -1.8)
+keep = rownames(bigChange)
+sigPhy = prune_taxa(keep, filtPhy)
+sigDf = data.frame(otu_table(sigPhy), sample_data(sigPhy))
+sigDfm = melt(sigDf, id.vars = colnames(sample_data(sigPhy)))
+
+
+
+##What are these taxa
+kable(bigChange)
+```
+
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+
+sigDfm$ASV_name = sigDfm$variable
+tax = as.data.frame(filtPhy@tax_table@.Data)
+combinedDf = plyr::join(sigDfm, tax)
+
+combinedDf$variable <- factor(combinedDf$variable,levels=c("ASV_1","ASV_2","ASV_15","ASV_6","ASV_12"))
+
+combinedDf$variable = revalue(combinedDf$variable, c(
+  "ASV_1" = "Klebsiella_1", 
+  "ASV_2" = "Klebsiella_2",
+  "ASV_15" = "Klebsiella_15",
+  "ASV_6" = "Lactobacillus_6",
+  "ASV_12" = "Bacteroides_12"
+  ))
+
+colors<-c("Firmicutes"="#009900","Bacteroidetes"="#FF6666","Proteobacteria"="#3399FF", "Patescibacteria"="lightblue2", "Deferribacteres"="#c994c7", "Tenericutes"="mediumpurple4", "Verrucomicrobia"="#CD853F", "Actinobacteria"="#A0A0A0")
+
+p1 =  ggplot(combinedDf, aes(as.factor(Day_old), value, fill=Phylum))+ 
+      facet_wrap(~variable, scales="free_y", ncol=3) +
+      geom_boxplot()  +
+      geom_point()+
+      ggtitle("G") + 
+      xlab("Day")+
+      scale_colour_manual(values=colors) + scale_fill_manual(values=colors)+
+      annotate("segment", x=8.5, xend=8.5, y=-Inf, yend=Inf, color="orange")+
+      ylab("Counts")
+
+
+ggsave(p1, filename="sigTaxa_negative.png", height=4, width=8)
+fig3g = p1
+fig3g
+
+```
+
+
+###Figure 3H: These are the taxa associated with a stabilization of microbiota (not conducive to Klebsiella) in the late group.
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+
+bigChange = subset(sigtab, log2FoldChange > 3)
+keep = rownames(bigChange)
+
+sigPhy = prune_taxa(keep, filtPhy)
+sigDf = data.frame(otu_table(sigPhy), sample_data(sigPhy))
+sigDfm = melt(sigDf, id.vars = colnames(sample_data(sigPhy)))
+
+
+##What are these taxa 
+kable(bigChange)
+```
+
+
+```{r, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+#join two data frames
+sigDfm$ASV_name = sigDfm$variable
+tax = as.data.frame(filtPhy@tax_table@.Data)
+combinedDf = plyr::join(sigDfm, tax)
+
+combinedDf$variable <- factor(combinedDf$variable,levels=c("ASV_84","ASV_83","ASV_44","ASV_51","ASV_90","ASV_94","ASV_4","ASV_131","ASV_19"))
+
+combinedDf$variable = revalue(combinedDf$variable, c(
+  "ASV_131" = "Muribaculaceae spp_131",
+  "ASV_19" = "Akkermansia_19",
+  "ASV_44" = "Lachnospiraceae_NK4A136_44",
+  "ASV_83" = "Lachnospiraceae spp_83",
+  "ASV_84" = "Ruminococcaceae_UCG-003_84",
+  "ASV_4" = "Muribaculaceae spp_4",
+  "ASV_51" = "Lachnospiraceae_NK4A136_51",
+  "ASV_90" = "Lachnospiraceae_NK4A136_90",
+  "ASV_94" = "Lachnospiraceae_NK4A136_94"
+))
+
+colors<-c("Firmicutes"="#009900","Bacteroidetes"="#FF6666","Proteobacteria"="#3399FF", "Patescibacteria"="lightblue2", "Deferribacteres"="#c994c7", "Tenericutes"="mediumpurple4", "Verrucomicrobia"="#CD853F", "Actinobacteria"="#A0A0A0")
+
+p1 =  ggplot(combinedDf, aes(as.factor(Day_old), value, fill=Phylum))+ 
+      facet_wrap(~variable, scales="free_y", ncol=3) +
+      geom_boxplot()  +
+      geom_point()+
+      ggtitle("H") + 
+      xlab("Day")+
+      scale_colour_manual(values=colors) + scale_fill_manual(values=colors)+
+      annotate("segment", x=8.5, xend=8.5, y=-Inf, yend=Inf, color="orange")+
+      ylab("Counts")
+
+ggsave(p1, filename="sigTaxa_positive.png", height=10, width=8)
+fig3h = p1
+fig3h
+```
+
+
+
+
+```{r}
+ggsave(grid.arrange(fig3b, fig3c, fig3d, fig3e, fig3f, fig3g, fig3h, ncol=1), file="fig3.pdf",  width = 8.5, height = 30, units ="in", dpi = 300) 
+
+
+```
